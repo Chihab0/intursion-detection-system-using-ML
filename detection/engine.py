@@ -36,17 +36,8 @@ class DetectionEngine:
             4: "DoS"
         }
 
-    def preprocess_flows(self, flows_dict) -> pd.DataFrame:
-        """
-        Extract features from flows and scale them for prediction.
-        """
-        features_df = extract_features(flows_dict)
-        if features_df.empty:
-            return pd.DataFrame(), pd.DataFrame()
-
-        # Define expected feature columns (20 features used in training)
-        # These must match the order used during model training
-        expected_features = [
+        # Exact training feature order
+        self.expected_features = [
             'Destination Port',
             'Flow Duration',
             'Total Fwd Packets',
@@ -68,13 +59,62 @@ class DetectionEngine:
             'Average Packet Size',
             'Subflow Fwd Bytes'
         ]
-        
+
+    def _identify_portscan_sources(self, df: pd.DataFrame):
+        """Identify likely scanning source IPs via aggregation heuristics."""
+        required_cols = {'Src IP', 'Destination Port', 'Total Backward Packets', 'Flow Duration'}
+        if not required_cols.issubset(df.columns):
+            return set()
+        suspects = set()
+        grp = df.groupby('Src IP', dropna=True)
+        for src, g in grp:
+            if g.empty:
+                continue
+            n_flows = len(g)
+            unique_ports = g['Destination Port'].nunique(dropna=True)
+            low_bwd_ratio = (g['Total Backward Packets'] <= 1).mean()  # mostly no responses
+            short_dur_ratio = (g['Flow Duration'] <= 0.02).mean()       # bursts of very short flows
+            # Dynamic thresholds scale with number of flows
+            port_thresh = max(20, int(0.2 * n_flows))
+            if unique_ports >= port_thresh and low_bwd_ratio >= 0.8 and short_dur_ratio >= 0.8:
+                suspects.add(src)
+        return suspects
+
+    def _identify_ddos_targets(self, df: pd.DataFrame):
+        """Identify likely DDoS targets via aggregation heuristics across flows."""
+        required_cols = {'Src IP', 'Dst IP', 'Destination Port', 'Total Backward Packets', 'Flow Duration'}
+        if not required_cols.issubset(df.columns):
+            return set()
+        targets = set()
+        grp = df.groupby(['Dst IP', 'Destination Port'], dropna=True)
+        for (dst_ip, dport), g in grp:
+            if g.empty:
+                continue
+            n_flows = len(g)
+            unique_src = g['Src IP'].nunique(dropna=True)
+            low_bwd_ratio = (g['Total Backward Packets'] <= 1).mean()
+            avg_dur = g['Flow Duration'].mean()
+            # Dynamic thresholds
+            flows_thresh = max(50, int(0.25 * len(df)))
+            unique_src_thresh = max(20, int(0.2 * n_flows))
+            if n_flows >= flows_thresh and unique_src >= unique_src_thresh and low_bwd_ratio >= 0.95 and avg_dur <= 0.1:
+                targets.add((dst_ip, dport))
+        return targets
+
+    def preprocess_flows(self, flows_dict) -> pd.DataFrame:
+        """
+        Extract features from flows and scale them for prediction.
+        """
+        features_df = extract_features(flows_dict)
+        if features_df.empty:
+            return pd.DataFrame(), pd.DataFrame()
+
         # Ensure all features used in training are present
-        for col in expected_features:
+        for col in self.expected_features:
             if col not in features_df.columns:
                 features_df[col] = 0
 
-        X = features_df[expected_features].fillna(0)
+        X = features_df[self.expected_features].fillna(0)
         X_scaled = self.scaler.transform(X)
         return X_scaled, features_df
 
@@ -89,7 +129,19 @@ class DetectionEngine:
             return features_df
 
         preds = self.model.predict(X_scaled)
-        features_df['ML_Label'] = [self.label_mapping.get(p, "Unknown") for p in preds]
+        features_df['ML_Label'] = [self.label_mapping.get(int(p), "Unknown") for p in preds]
+
+        # Apply PortScan heuristic override (per source fan-out)
+        scan_sources = self._identify_portscan_sources(features_df)
+        if scan_sources:
+            mask = features_df['Src IP'].isin(scan_sources)
+            features_df.loc[mask, 'ML_Label'] = 'PortScan'
+
+        # Apply DDoS heuristic override (per target fan-in)
+        ddos_targets = self._identify_ddos_targets(features_df)
+        if ddos_targets:
+            mask_ddos = features_df.apply(lambda r: (r.get('Dst IP'), r.get('Destination Port')) in ddos_targets, axis=1)
+            features_df.loc[mask_ddos, 'ML_Label'] = 'DDoS'
         return features_df
 
     def predict_single_flow(self, pkt_list):
