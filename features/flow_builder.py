@@ -1,6 +1,5 @@
 # features/flow_builder.py
 from scapy.all import TCP, UDP, IP
-import pandas as pd
 
 
 def build_flows(packets):

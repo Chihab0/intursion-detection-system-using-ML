@@ -6,7 +6,7 @@ from features.feature_extractor import extract_features
 from features.flow_builder import build_flows
 
 # Paths to ML artifacts
-MODEL_PATH = os.path.join("ml", "xgboost_ids_model_top20.pkl")
+MODEL_PATH = os.path.join("ml", "xgboost_ids_model.pkl")
 SCALER_PATH = os.path.join("ml", "scaler.pkl")
 
 class DetectionEngine:
@@ -44,13 +44,37 @@ class DetectionEngine:
         if features_df.empty:
             return pd.DataFrame(), pd.DataFrame()
 
+        # Define expected feature columns (20 features used in training)
+        # These must match the order used during model training
+        expected_features = [
+            'Destination Port',
+            'Flow Duration',
+            'Total Fwd Packets',
+            'Total Backward Packets',
+            'Total Length of Fwd Packets',
+            'Total Length of Bwd Packets',
+            'Fwd Packet Length Max',
+            'Fwd Packet Length Min',
+            'Fwd Packet Length Mean',
+            'Bwd Packet Length Max',
+            'Bwd Packet Length Min',
+            'Bwd Packet Length Mean',
+            'Flow Bytes/s',
+            'Flow Packets/s',
+            'Fwd IAT Mean',
+            'Bwd IAT Mean',
+            'Fwd Header Length',
+            'Bwd Header Length',
+            'Average Packet Size',
+            'Subflow Fwd Bytes'
+        ]
+        
         # Ensure all features used in training are present
-        feature_columns = self.model.feature_names_in_
-        for col in feature_columns:
+        for col in expected_features:
             if col not in features_df.columns:
                 features_df[col] = 0
 
-        X = features_df[feature_columns].fillna(0)
+        X = features_df[expected_features].fillna(0)
         X_scaled = self.scaler.transform(X)
         return X_scaled, features_df
 
